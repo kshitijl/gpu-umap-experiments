@@ -91,6 +91,18 @@ def sync_device(dev):
         torch.mps.synchronize()
 
 
+def print_tensor_info(name, tensor):
+    """Print tensor size and memory usage.
+
+    Args:
+        name: Name of the tensor
+        tensor: The tensor to print info about
+    """
+    size_bytes = tensor.element_size() * tensor.nelement()
+    size_mb = size_bytes / (1024 * 1024)
+    print(f"  {name}: shape={list(tensor.shape)}, size={size_mb:.2f} MB")
+
+
 def generate_graph_data(num_nodes, avg_degree, device):
     """Generate realistic graph data for benchmarking.
 
@@ -126,6 +138,16 @@ def generate_graph_data(num_nodes, avg_degree, device):
     edge_weights = torch.rand(num_edges, 1, device=device, dtype=torch.float32)
 
     print("Data generation complete.")
+    print("\n--- Tensor Sizes ---")
+    print_tensor_info("node_positions", node_positions)
+    print_tensor_info("edges", edges)
+    print_tensor_info("edge_weights", edge_weights)
+    total_mb = (
+        node_positions.element_size() * node_positions.nelement() +
+        edges.element_size() * edges.nelement() +
+        edge_weights.element_size() * edge_weights.nelement()
+    ) / (1024 * 1024)
+    print(f"  Total (base tensors): {total_mb:.2f} MB")
 
     return node_positions, edges, edge_weights, num_edges
 
@@ -219,12 +241,21 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
             sync_device(device)
             timings["gather"] += time.time() - op_start_time
 
+            # Print tensor sizes on first iteration
+            if i == 0:
+                print("\n--- Intermediate Tensor Sizes (first iteration) ---")
+                print_tensor_info("pos_u (gathered)", pos_u)
+                print_tensor_info("pos_v (gathered)", pos_v)
+
             # 2. COMPUTE
             sync_device(device)
             op_start_time = time.time()
             delta = (pos_v - pos_u) * edge_weights * learning_rate
             sync_device(device)
             timings["compute"] += time.time() - op_start_time
+
+            if i == 0:
+                print_tensor_info("delta (computed)", delta)
 
             # 3. SCATTER-ADD
             sync_device(device)
@@ -238,6 +269,17 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
             )
             sync_device(device)
             timings["scatter_add"] += time.time() - op_start_time
+
+            if i == 0:
+                print_tensor_info("update_aggregator (scattered)", update_aggregator)
+                # Calculate peak memory usage for intermediate tensors
+                intermediate_mb = (
+                    pos_u.element_size() * pos_u.nelement() +
+                    pos_v.element_size() * pos_v.nelement() +
+                    delta.element_size() * delta.nelement() +
+                    update_aggregator.element_size() * update_aggregator.nelement()
+                ) / (1024 * 1024)
+                print(f"  Peak intermediate memory: {intermediate_mb:.2f} MB\n")
 
             # 4. APPLY UPDATES
             sync_device(device)
