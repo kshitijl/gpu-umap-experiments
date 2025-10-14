@@ -63,6 +63,11 @@ def parse_args():
         action="store_true",
         help="Use int64 instead of int32 for edge indices (default: int32)",
     )
+    parser.add_argument(
+        "--use-segment-reduce",
+        action="store_true",
+        help="Use segment_reduce instead of scatter_add (requires sorting)",
+    )
     return parser.parse_args()
 
 
@@ -214,6 +219,62 @@ def generate_graph_data(num_nodes, avg_degree, device, use_int64=False):
     return node_positions, edges, edge_weights, num_edges
 
 
+def apply_updates_segment_reduce(node_positions, indices_src, indices_dst, deltas, num_nodes, device):
+    """Apply updates using segment_reduce (requires sorting).
+
+    Args:
+        node_positions: Node position tensor to update
+        indices_src: Source node indices
+        indices_dst: Destination node indices
+        deltas: Delta values to apply
+        num_nodes: Total number of nodes
+        device: PyTorch device
+
+    Returns:
+        dict: Timing breakdown
+    """
+    timings = {
+        "concat": 0.0,
+        "sort": 0.0,
+        "reduce": 0.0,
+    }
+
+    with torch.no_grad():
+        # 1. CONCATENATE source and dest
+        sync_device(device)
+        op_start_time = time.time()
+        all_indices = torch.cat([indices_src, indices_dst])
+        all_deltas = torch.cat([deltas, -deltas], dim=0)
+        sync_device(device)
+        timings["concat"] += time.time() - op_start_time
+
+        # 2. SORT by node index
+        sync_device(device)
+        op_start_time = time.time()
+        sorted_indices, perm = torch.sort(all_indices)
+        sorted_deltas = all_deltas[perm]
+        sync_device(device)
+        timings["sort"] += time.time() - op_start_time
+
+        # 3. REDUCE using segment_reduce
+        sync_device(device)
+        op_start_time = time.time()
+        # Compute segment lengths (how many updates per node)
+        segment_lengths = torch.bincount(sorted_indices, minlength=num_nodes)
+        # segment_reduce sums all deltas for each node
+        node_updates = torch.segment_reduce(
+            data=sorted_deltas,
+            reduce='sum',
+            lengths=segment_lengths
+        )
+        # Apply updates
+        node_positions += node_updates
+        sync_device(device)
+        timings["reduce"] += time.time() - op_start_time
+
+    return timings
+
+
 def verify_node_degrees(edges, num_nodes):
     """Verify and print statistics about node degrees.
 
@@ -241,7 +302,7 @@ def verify_node_degrees(edges, num_nodes):
     print(f"Max degree: {max_degree:.2f}\n")
 
 
-def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learning_rate, device, index_dtype):
+def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learning_rate, device, index_dtype, use_segment_reduce=False):
     """Apply repulsive forces to random pairs of nodes.
 
     Args:
@@ -251,16 +312,27 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
         negative_learning_rate: Learning rate for repulsive forces
         device: PyTorch device
         index_dtype: Data type for indices (int32 or int64)
+        use_segment_reduce: If True, use segment_reduce instead of scatter_add
 
     Returns:
         dict: Timing breakdown for the operation
     """
-    timings = {
-        "sample": 0.0,
-        "gather": 0.0,
-        "compute": 0.0,
-        "scatter_add": 0.0,
-    }
+    if use_segment_reduce:
+        timings = {
+            "sample": 0.0,
+            "gather": 0.0,
+            "compute": 0.0,
+            "concat": 0.0,
+            "sort": 0.0,
+            "reduce": 0.0,
+        }
+    else:
+        timings = {
+            "sample": 0.0,
+            "gather": 0.0,
+            "compute": 0.0,
+            "scatter_add": 0.0,
+        }
 
     with torch.no_grad():
         # 1. SAMPLE random pairs
@@ -285,23 +357,38 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
         sync_device(device)
         timings["compute"] += time.time() - op_start_time
 
-        # 4. SCATTER-ADD (note: signs are flipped to push apart)
-        # Update node_positions directly without intermediate tensor
-        sync_device(device)
-        op_start_time = time.time()
-        node_positions.scatter_add_(
-            0, random_pairs[:, 0].unsqueeze(1).expand_as(delta), -delta
-        )
-        node_positions.scatter_add_(
-            0, random_pairs[:, 1].unsqueeze(1).expand_as(delta), delta
-        )
-        sync_device(device)
-        timings["scatter_add"] += time.time() - op_start_time
+        # 4. APPLY UPDATES
+        if use_segment_reduce:
+            # Use segment_reduce approach (note: delta sign flip for repulsion)
+            update_timings = apply_updates_segment_reduce(
+                node_positions,
+                random_pairs[:, 0],
+                random_pairs[:, 1],
+                -delta,  # Negative delta for source nodes
+                num_nodes,
+                device
+            )
+            timings["concat"] += update_timings["concat"]
+            timings["sort"] += update_timings["sort"]
+            timings["reduce"] += update_timings["reduce"]
+        else:
+            # SCATTER-ADD (note: signs are flipped to push apart)
+            # Update node_positions directly without intermediate tensor
+            sync_device(device)
+            op_start_time = time.time()
+            node_positions.scatter_add_(
+                0, random_pairs[:, 0].unsqueeze(1).expand_as(delta), -delta
+            )
+            node_positions.scatter_add_(
+                0, random_pairs[:, 1].unsqueeze(1).expand_as(delta), delta
+            )
+            sync_device(device)
+            timings["scatter_add"] += time.time() - op_start_time
 
     return timings
 
 
-def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device):
+def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device, num_nodes=None, use_segment_reduce=False):
     """Run a warm-up iteration to initialize GPU kernels.
 
     Args:
@@ -310,18 +397,32 @@ def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device)
         edge_weights: Edge weight tensor
         learning_rate: Learning rate for updates
         device: PyTorch device
+        num_nodes: Total number of nodes (required if use_segment_reduce=True)
+        use_segment_reduce: If True, use segment_reduce instead of scatter_add
     """
     with torch.no_grad():
         pos_u = node_positions[edges[:, 0]]
         pos_v = node_positions[edges[:, 1]]
         delta = (pos_v - pos_u) * edge_weights * learning_rate
-        # Update directly without intermediate tensor
-        node_positions.scatter_add_(
-            0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
-        )
-        node_positions.scatter_add_(
-            0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
-        )
+
+        if use_segment_reduce:
+            # Use segment_reduce approach
+            apply_updates_segment_reduce(
+                node_positions,
+                edges[:, 0],
+                edges[:, 1],
+                delta,
+                num_nodes,
+                device
+            )
+        else:
+            # Update directly without intermediate tensor
+            node_positions.scatter_add_(
+                0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
+            )
+            node_positions.scatter_add_(
+                0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
+            )
         sync_device(device)
 
 
@@ -337,6 +438,7 @@ def run_benchmark(
     num_nodes,
     num_edges,
     index_dtype,
+    use_segment_reduce=False,
 ):
     """Run the main benchmark loop.
 
@@ -352,23 +454,43 @@ def run_benchmark(
         num_nodes: Total number of nodes
         num_edges: Number of edges
         index_dtype: Data type for indices
+        use_segment_reduce: If True, use segment_reduce instead of scatter_add
 
     Returns:
         tuple: (total_duration, timings_dict)
     """
-    timings = {
-        "attractive": {
-            "gather": 0.0,
-            "compute": 0.0,
-            "scatter_add": 0.0,
-        },
-        "repulsive": {
-            "sample": 0.0,
-            "gather": 0.0,
-            "compute": 0.0,
-            "scatter_add": 0.0,
-        },
-    }
+    if use_segment_reduce:
+        timings = {
+            "attractive": {
+                "gather": 0.0,
+                "compute": 0.0,
+                "concat": 0.0,
+                "sort": 0.0,
+                "reduce": 0.0,
+            },
+            "repulsive": {
+                "sample": 0.0,
+                "gather": 0.0,
+                "compute": 0.0,
+                "concat": 0.0,
+                "sort": 0.0,
+                "reduce": 0.0,
+            },
+        }
+    else:
+        timings = {
+            "attractive": {
+                "gather": 0.0,
+                "compute": 0.0,
+                "scatter_add": 0.0,
+            },
+            "repulsive": {
+                "sample": 0.0,
+                "gather": 0.0,
+                "compute": 0.0,
+                "scatter_add": 0.0,
+            },
+        }
 
     print(f"Starting benchmark for {num_epochs} epochs...")
     print(f"Each epoch: 1 attractive pass + {num_negatives} repulsive passes")
@@ -401,18 +523,33 @@ def run_benchmark(
             if i == 0:
                 print_tensor_info("delta (computed)", delta)
 
-            # 3. SCATTER-ADD
-            # Update node_positions directly without intermediate tensor
-            sync_device(device)
-            op_start_time = time.time()
-            node_positions.scatter_add_(
-                0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
-            )
-            node_positions.scatter_add_(
-                0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
-            )
-            sync_device(device)
-            timings["attractive"]["scatter_add"] += time.time() - op_start_time
+            # 3. APPLY UPDATES
+            if use_segment_reduce:
+                # Use segment_reduce approach
+                update_timings = apply_updates_segment_reduce(
+                    node_positions,
+                    edges[:, 0],
+                    edges[:, 1],
+                    delta,
+                    num_nodes,
+                    device
+                )
+                timings["attractive"]["concat"] += update_timings["concat"]
+                timings["attractive"]["sort"] += update_timings["sort"]
+                timings["attractive"]["reduce"] += update_timings["reduce"]
+            else:
+                # SCATTER-ADD
+                # Update node_positions directly without intermediate tensor
+                sync_device(device)
+                op_start_time = time.time()
+                node_positions.scatter_add_(
+                    0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
+                )
+                node_positions.scatter_add_(
+                    0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
+                )
+                sync_device(device)
+                timings["attractive"]["scatter_add"] += time.time() - op_start_time
 
             if i == 0:
                 # Calculate peak memory usage for intermediate tensors
@@ -432,6 +569,7 @@ def run_benchmark(
                 negative_learning_rate,
                 device,
                 index_dtype,
+                use_segment_reduce,
             )
             # Accumulate timings
             for key in neg_timings:
@@ -535,7 +673,15 @@ def main():
 
     verify_node_degrees(edges, args.num_nodes)
 
-    warmup_iteration(node_positions, edges, edge_weights, args.learning_rate, device)
+    warmup_iteration(
+        node_positions,
+        edges,
+        edge_weights,
+        args.learning_rate,
+        device,
+        args.num_nodes,
+        args.use_segment_reduce
+    )
 
     total_duration, timings = run_benchmark(
         node_positions,
@@ -549,6 +695,7 @@ def main():
         args.num_nodes,
         num_edges,
         index_dtype,
+        args.use_segment_reduce,
     )
 
     checksum = compute_checksum(node_positions)
