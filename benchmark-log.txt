@@ -1,0 +1,27 @@
+
+uv run graph.py
+Using Apple Metal (MPS) device.
+Generating realistic data for 20,000,000 nodes...
+Dynamically set NUM_EDGES to 100,000,000
+Data generation complete.
+
+--- Verifying Node Degrees ---
+Mean degree:   10.00
+Median degree: 10.00
+Variance of degree: 5.00
+
+Min degree: 5.00
+
+Max degree: 26.00
+
+Starting benchmark for 5 iterations...
+
+--- Benchmark Results ---
+Total time for 5 iterations: 14.0227 seconds
+Average time per iteration: 2.8045 seconds
+
+--- Aggregated Time Per Operation ---
+gather         : 2.4723 seconds (17.63%)
+compute        : 1.3887 seconds (9.90%)
+scatter_add    : 10.1424 seconds (72.33%)
+apply_updates  : 0.0156 seconds (0.11%)
