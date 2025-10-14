@@ -260,7 +260,6 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
         "gather": 0.0,
         "compute": 0.0,
         "scatter_add": 0.0,
-        "apply_updates": 0.0,
     }
 
     with torch.no_grad():
@@ -287,24 +286,17 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
         timings["compute"] += time.time() - op_start_time
 
         # 4. SCATTER-ADD (note: signs are flipped to push apart)
+        # Update node_positions directly without intermediate tensor
         sync_device(device)
         op_start_time = time.time()
-        update_aggregator = torch.zeros_like(node_positions)
-        update_aggregator.scatter_add_(
+        node_positions.scatter_add_(
             0, random_pairs[:, 0].unsqueeze(1).expand_as(delta), -delta
         )
-        update_aggregator.scatter_add_(
+        node_positions.scatter_add_(
             0, random_pairs[:, 1].unsqueeze(1).expand_as(delta), delta
         )
         sync_device(device)
         timings["scatter_add"] += time.time() - op_start_time
-
-        # 5. APPLY UPDATES
-        sync_device(device)
-        op_start_time = time.time()
-        node_positions += update_aggregator
-        sync_device(device)
-        timings["apply_updates"] += time.time() - op_start_time
 
     return timings
 
@@ -323,14 +315,13 @@ def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device)
         pos_u = node_positions[edges[:, 0]]
         pos_v = node_positions[edges[:, 1]]
         delta = (pos_v - pos_u) * edge_weights * learning_rate
-        update_aggregator = torch.zeros_like(node_positions)
-        update_aggregator.scatter_add_(
+        # Update directly without intermediate tensor
+        node_positions.scatter_add_(
             0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
         )
-        update_aggregator.scatter_add_(
+        node_positions.scatter_add_(
             0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
         )
-        node_positions += update_aggregator
         sync_device(device)
 
 
@@ -370,14 +361,12 @@ def run_benchmark(
             "gather": 0.0,
             "compute": 0.0,
             "scatter_add": 0.0,
-            "apply_updates": 0.0,
         },
         "repulsive": {
             "sample": 0.0,
             "gather": 0.0,
             "compute": 0.0,
             "scatter_add": 0.0,
-            "apply_updates": 0.0,
         },
     }
 
@@ -413,35 +402,26 @@ def run_benchmark(
                 print_tensor_info("delta (computed)", delta)
 
             # 3. SCATTER-ADD
+            # Update node_positions directly without intermediate tensor
             sync_device(device)
             op_start_time = time.time()
-            update_aggregator = torch.zeros_like(node_positions)
-            update_aggregator.scatter_add_(
+            node_positions.scatter_add_(
                 0, edges[:, 0].unsqueeze(1).expand_as(delta), delta
             )
-            update_aggregator.scatter_add_(
+            node_positions.scatter_add_(
                 0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
             )
             sync_device(device)
             timings["attractive"]["scatter_add"] += time.time() - op_start_time
 
             if i == 0:
-                print_tensor_info("update_aggregator (scattered)", update_aggregator)
                 # Calculate peak memory usage for intermediate tensors
                 intermediate_bytes = (
                     get_tensor_size_bytes(pos_u) +
                     get_tensor_size_bytes(pos_v) +
-                    get_tensor_size_bytes(delta) +
-                    get_tensor_size_bytes(update_aggregator)
+                    get_tensor_size_bytes(delta)
                 )
                 print(f"  Peak intermediate memory (attractive): {format_bytes(intermediate_bytes)}\n")
-
-            # 4. APPLY UPDATES
-            sync_device(device)
-            op_start_time = time.time()
-            node_positions += update_aggregator
-            sync_device(device)
-            timings["attractive"]["apply_updates"] += time.time() - op_start_time
 
         # REPULSIVE PHASE: Process random pairs (push random nodes apart)
         for neg_iter in range(num_negatives):
