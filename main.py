@@ -45,6 +45,11 @@ def parse_args():
         default=42,
         help="Random seed for reproducibility (default: 42)",
     )
+    parser.add_argument(
+        "--use-int64",
+        action="store_true",
+        help="Use int64 instead of int32 for edge indices (default: int32)",
+    )
     return parser.parse_args()
 
 
@@ -134,23 +139,36 @@ def print_tensor_info(name, tensor):
     print(f"  {name}: shape={list(tensor.shape)}, size={size_str}")
 
 
-def generate_graph_data(num_nodes, avg_degree, device):
+def generate_graph_data(num_nodes, avg_degree, device, use_int64=False):
     """Generate realistic graph data for benchmarking.
 
     Args:
         num_nodes: Number of nodes in the graph
         avg_degree: Average degree per node
         device: PyTorch device to use
+        use_int64: If True, use int64 for edge indices instead of int32
 
     Returns:
         tuple: (node_positions, edges, edge_weights, num_edges)
     """
     print(f"Generating realistic data for {num_nodes:,} nodes...")
 
+    # Determine index dtype
+    index_dtype = torch.int64 if use_int64 else torch.int32
+    dtype_name = "int64" if use_int64 else "int32"
+    print(f"Using {dtype_name} for edge indices")
+
+    # Check if int32 can represent num_nodes
+    if not use_int64 and num_nodes > 2147483647:
+        raise ValueError(
+            f"Cannot use int32 for {num_nodes:,} nodes (max: 2,147,483,647). "
+            "Use int64 (add --use-int64 flag)"
+        )
+
     node_positions = torch.rand(num_nodes, 2, device=device, dtype=torch.float32)
 
     # Create the source nodes
-    source_nodes = torch.arange(num_nodes, device=device).repeat_interleave(
+    source_nodes = torch.arange(num_nodes, device=device, dtype=index_dtype).repeat_interleave(
         avg_degree // 2
     )
 
@@ -159,10 +177,10 @@ def generate_graph_data(num_nodes, avg_degree, device):
     print(f"Dynamically set NUM_EDGES to {num_edges:,}")
 
     # Create the destination nodes
-    dest_nodes = torch.randint(0, num_nodes, (num_edges,), device=device)
+    dest_nodes = torch.randint(0, num_nodes, (num_edges,), device=device, dtype=index_dtype)
 
     # Shuffle and combine
-    perm = torch.randperm(num_edges, device=device)
+    perm = torch.randperm(num_edges, device=device, dtype=index_dtype)
     source_nodes = source_nodes[perm]
     edges = torch.stack([source_nodes, dest_nodes], dim=1)
 
@@ -388,7 +406,7 @@ def main():
     device = get_device(args.device)
 
     node_positions, edges, edge_weights, num_edges = generate_graph_data(
-        args.num_nodes, args.degree, device
+        args.num_nodes, args.degree, device, args.use_int64
     )
 
     verify_node_degrees(edges, args.num_nodes)
