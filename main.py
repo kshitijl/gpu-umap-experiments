@@ -39,6 +39,12 @@ def parse_args():
         default=0.001,
         help="Learning rate for position updates (default: 0.001)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
     return parser.parse_args()
 
 
@@ -58,6 +64,23 @@ def get_device(device_arg):
         device = torch.device(device_arg)
         print(f"Using {device_arg.upper()} device.")
     return device
+
+
+def set_seed(seed):
+    """Set random seed for reproducibility across all random number generators.
+
+    Args:
+        seed: Random seed value
+    """
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
+    # Set deterministic algorithms for CUDA
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def sync_device(dev):
@@ -229,13 +252,33 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
     return total_duration, timings
 
 
-def print_results(total_duration, timings, num_iterations):
+def compute_checksum(node_positions):
+    """Compute a checksum of the final node positions for verification.
+
+    Args:
+        node_positions: Final node position tensor
+
+    Returns:
+        dict: Dictionary containing checksum metrics
+    """
+    checksum = {
+        "sum": node_positions.sum().cpu().item(),
+        "mean": node_positions.mean().cpu().item(),
+        "std": node_positions.std().cpu().item(),
+        "min": node_positions.min().cpu().item(),
+        "max": node_positions.max().cpu().item(),
+    }
+    return checksum
+
+
+def print_results(total_duration, timings, num_iterations, checksum):
     """Print benchmark results.
 
     Args:
         total_duration: Total time taken for all iterations
         timings: Dictionary of operation timings
         num_iterations: Number of iterations run
+        checksum: Dictionary of checksum metrics
     """
     print("\n--- Benchmark Results ---")
     print(f"Total time for {num_iterations} iterations: {total_duration:.4f} seconds")
@@ -246,10 +289,21 @@ def print_results(total_duration, timings, num_iterations):
         percentage = (t / total_duration) * 100
         print(f"{op:<15}: {t:.4f} seconds ({percentage:.2f}%)")
 
+    print("\n--- Result Checksum (for verification) ---")
+    print(f"Sum:  {checksum['sum']:.10f}")
+    print(f"Mean: {checksum['mean']:.10f}")
+    print(f"Std:  {checksum['std']:.10f}")
+    print(f"Min:  {checksum['min']:.10f}")
+    print(f"Max:  {checksum['max']:.10f}")
+
 
 def main():
     """Main entry point."""
     args = parse_args()
+
+    # Set seed for reproducibility
+    set_seed(args.seed)
+    print(f"Random seed set to: {args.seed}")
 
     device = get_device(args.device)
 
@@ -265,7 +319,9 @@ def main():
         node_positions, edges, edge_weights, args.learning_rate, args.iterations, device
     )
 
-    print_results(total_duration, timings, args.iterations)
+    checksum = compute_checksum(node_positions)
+
+    print_results(total_duration, timings, args.iterations, checksum)
 
 
 if __name__ == "__main__":
