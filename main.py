@@ -296,6 +296,13 @@ def print_results(total_duration, timings, num_iterations, checksum):
     print(f"Min:  {checksum['min']:.10f}")
     print(f"Max:  {checksum['max']:.10f}")
 
+    # Estimate time for 2000 iterations
+    avg_time_per_iteration = total_duration / num_iterations
+    estimated_time_2000 = avg_time_per_iteration * 2000
+    estimated_hours = estimated_time_2000 / 3600
+    print(f"\n--- Estimated Time for 2000 Iterations ---")
+    print(f"Estimated time: {estimated_hours:.2f} hours")
+
 
 def main():
     """Main entry point."""

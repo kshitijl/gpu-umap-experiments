@@ -25,3 +25,41 @@ gather         : 2.4723 seconds (17.63%)
 compute        : 1.3887 seconds (9.90%)
 scatter_add    : 10.1424 seconds (72.33%)
 apply_updates  : 0.0156 seconds (0.11%)
+
+
+
+➜  15-umap-gpu git:(main) ✗ uv run main.py --degree 20
+Random seed set to: 42
+Using Apple Metal (MPS) device.
+Generating realistic data for 20,000,000 nodes...
+Dynamically set NUM_EDGES to 200,000,000
+Data generation complete.
+
+--- Verifying Node Degrees ---
+Mean degree:   20.00
+Median degree: 20.00
+Variance of degree: 10.00
+Min degree: 10.00
+Max degree: 41.00
+
+Starting benchmark for 5 iterations...
+
+--- Benchmark Results ---
+Total time for 5 iterations: 120.3594 seconds
+Average time per iteration: 24.0719 seconds
+
+--- Aggregated Time Per Operation ---
+gather         : 32.1359 seconds (26.70%)
+compute        : 43.3999 seconds (36.06%)
+scatter_add    : 44.6546 seconds (37.10%)
+apply_updates  : 0.0913 seconds (0.08%)
+
+--- Result Checksum (for verification) ---
+Sum:  19999040.0000000000
+Mean: 0.4999760091
+Std:  0.2745829523
+Min:  0.0062087164
+Max:  0.9937735200
+
+--- Estimated Time for 2000 Iterations ---
+Estimated time: 13.37 hours
