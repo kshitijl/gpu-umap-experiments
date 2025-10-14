@@ -91,6 +91,37 @@ def sync_device(dev):
         torch.mps.synchronize()
 
 
+def format_bytes(size_bytes):
+    """Format bytes with appropriate unit (B, KB, MB, GB).
+
+    Args:
+        size_bytes: Size in bytes
+
+    Returns:
+        str: Formatted string with appropriate unit
+    """
+    if size_bytes < 1024:
+        return f"{size_bytes:.2f} B"
+    elif size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.2f} KB"
+    elif size_bytes < 1024 ** 3:
+        return f"{size_bytes / (1024 ** 2):.2f} MB"
+    else:
+        return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+
+def get_tensor_size_bytes(tensor):
+    """Calculate tensor size in bytes.
+
+    Args:
+        tensor: PyTorch tensor
+
+    Returns:
+        int: Size in bytes
+    """
+    return tensor.element_size() * tensor.nelement()
+
+
 def print_tensor_info(name, tensor):
     """Print tensor size and memory usage.
 
@@ -98,9 +129,9 @@ def print_tensor_info(name, tensor):
         name: Name of the tensor
         tensor: The tensor to print info about
     """
-    size_bytes = tensor.element_size() * tensor.nelement()
-    size_mb = size_bytes / (1024 * 1024)
-    print(f"  {name}: shape={list(tensor.shape)}, size={size_mb:.2f} MB")
+    size_bytes = get_tensor_size_bytes(tensor)
+    size_str = format_bytes(size_bytes)
+    print(f"  {name}: shape={list(tensor.shape)}, size={size_str}")
 
 
 def generate_graph_data(num_nodes, avg_degree, device):
@@ -142,12 +173,12 @@ def generate_graph_data(num_nodes, avg_degree, device):
     print_tensor_info("node_positions", node_positions)
     print_tensor_info("edges", edges)
     print_tensor_info("edge_weights", edge_weights)
-    total_mb = (
-        node_positions.element_size() * node_positions.nelement() +
-        edges.element_size() * edges.nelement() +
-        edge_weights.element_size() * edge_weights.nelement()
-    ) / (1024 * 1024)
-    print(f"  Total (base tensors): {total_mb:.2f} MB")
+    total_bytes = (
+        get_tensor_size_bytes(node_positions) +
+        get_tensor_size_bytes(edges) +
+        get_tensor_size_bytes(edge_weights)
+    )
+    print(f"  Total (base tensors): {format_bytes(total_bytes)}")
 
     return node_positions, edges, edge_weights, num_edges
 
@@ -273,13 +304,13 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
             if i == 0:
                 print_tensor_info("update_aggregator (scattered)", update_aggregator)
                 # Calculate peak memory usage for intermediate tensors
-                intermediate_mb = (
-                    pos_u.element_size() * pos_u.nelement() +
-                    pos_v.element_size() * pos_v.nelement() +
-                    delta.element_size() * delta.nelement() +
-                    update_aggregator.element_size() * update_aggregator.nelement()
-                ) / (1024 * 1024)
-                print(f"  Peak intermediate memory: {intermediate_mb:.2f} MB\n")
+                intermediate_bytes = (
+                    get_tensor_size_bytes(pos_u) +
+                    get_tensor_size_bytes(pos_v) +
+                    get_tensor_size_bytes(delta) +
+                    get_tensor_size_bytes(update_aggregator)
+                )
+                print(f"  Peak intermediate memory: {format_bytes(intermediate_bytes)}\n")
 
             # 4. APPLY UPDATES
             sync_device(device)
