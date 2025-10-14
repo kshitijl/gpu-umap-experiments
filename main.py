@@ -29,16 +29,28 @@ def parse_args():
         help="Average degree per node (default: 10)",
     )
     parser.add_argument(
-        "--iterations",
+        "--epochs",
         type=int,
         default=5,
-        help="Number of benchmark iterations (default: 5)",
+        help="Number of training epochs (default: 5)",
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
         default=0.001,
-        help="Learning rate for position updates (default: 0.001)",
+        help="Learning rate for attractive forces (default: 0.001)",
+    )
+    parser.add_argument(
+        "--negative-learning-rate",
+        type=float,
+        default=0.0001,
+        help="Learning rate for repulsive forces (default: 0.0001)",
+    )
+    parser.add_argument(
+        "--num-negatives",
+        type=int,
+        default=5,
+        help="Number of negative samples per epoch (default: 5)",
     )
     parser.add_argument(
         "--seed",
@@ -229,6 +241,74 @@ def verify_node_degrees(edges, num_nodes):
     print(f"Max degree: {max_degree:.2f}\n")
 
 
+def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learning_rate, device, index_dtype):
+    """Apply repulsive forces to random pairs of nodes.
+
+    Args:
+        node_positions: Node position tensor
+        num_nodes: Total number of nodes
+        num_pairs: Number of random pairs to sample
+        negative_learning_rate: Learning rate for repulsive forces
+        device: PyTorch device
+        index_dtype: Data type for indices (int32 or int64)
+
+    Returns:
+        dict: Timing breakdown for the operation
+    """
+    timings = {
+        "sample": 0.0,
+        "gather": 0.0,
+        "compute": 0.0,
+        "scatter_add": 0.0,
+        "apply_updates": 0.0,
+    }
+
+    with torch.no_grad():
+        # 1. SAMPLE random pairs
+        sync_device(device)
+        op_start_time = time.time()
+        random_pairs = torch.randint(0, num_nodes, (num_pairs, 2), device=device, dtype=index_dtype)
+        sync_device(device)
+        timings["sample"] += time.time() - op_start_time
+
+        # 2. GATHER
+        sync_device(device)
+        op_start_time = time.time()
+        pos_u = node_positions[random_pairs[:, 0]]
+        pos_v = node_positions[random_pairs[:, 1]]
+        sync_device(device)
+        timings["gather"] += time.time() - op_start_time
+
+        # 3. COMPUTE (repulsive delta - push apart)
+        sync_device(device)
+        op_start_time = time.time()
+        delta = (pos_v - pos_u) * negative_learning_rate
+        sync_device(device)
+        timings["compute"] += time.time() - op_start_time
+
+        # 4. SCATTER-ADD (note: signs are flipped to push apart)
+        sync_device(device)
+        op_start_time = time.time()
+        update_aggregator = torch.zeros_like(node_positions)
+        update_aggregator.scatter_add_(
+            0, random_pairs[:, 0].unsqueeze(1).expand_as(delta), -delta
+        )
+        update_aggregator.scatter_add_(
+            0, random_pairs[:, 1].unsqueeze(1).expand_as(delta), delta
+        )
+        sync_device(device)
+        timings["scatter_add"] += time.time() - op_start_time
+
+        # 5. APPLY UPDATES
+        sync_device(device)
+        op_start_time = time.time()
+        node_positions += update_aggregator
+        sync_device(device)
+        timings["apply_updates"] += time.time() - op_start_time
+
+    return timings
+
+
 def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device):
     """Run a warm-up iteration to initialize GPU kernels.
 
@@ -254,31 +334,59 @@ def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device)
         sync_device(device)
 
 
-def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterations, device):
+def run_benchmark(
+    node_positions,
+    edges,
+    edge_weights,
+    learning_rate,
+    negative_learning_rate,
+    num_negatives,
+    num_epochs,
+    device,
+    num_nodes,
+    num_edges,
+    index_dtype,
+):
     """Run the main benchmark loop.
 
     Args:
         node_positions: Node position tensor
         edges: Edge tensor
         edge_weights: Edge weight tensor
-        learning_rate: Learning rate for updates
-        num_iterations: Number of iterations to run
+        learning_rate: Learning rate for attractive forces
+        negative_learning_rate: Learning rate for repulsive forces
+        num_negatives: Number of negative samples per epoch
+        num_epochs: Number of epochs to run
         device: PyTorch device
+        num_nodes: Total number of nodes
+        num_edges: Number of edges
+        index_dtype: Data type for indices
 
     Returns:
         tuple: (total_duration, timings_dict)
     """
     timings = {
-        "gather": 0.0,
-        "compute": 0.0,
-        "scatter_add": 0.0,
-        "apply_updates": 0.0,
+        "attractive": {
+            "gather": 0.0,
+            "compute": 0.0,
+            "scatter_add": 0.0,
+            "apply_updates": 0.0,
+        },
+        "repulsive": {
+            "sample": 0.0,
+            "gather": 0.0,
+            "compute": 0.0,
+            "scatter_add": 0.0,
+            "apply_updates": 0.0,
+        },
     }
 
-    print(f"Starting benchmark for {num_iterations} iterations...")
+    print(f"Starting benchmark for {num_epochs} epochs...")
+    print(f"Each epoch: 1 attractive pass + {num_negatives} repulsive passes")
 
     total_start_time = time.time()
-    for i in tqdm(range(num_iterations), desc="Benchmark", unit="iter"):
+    for i in tqdm(range(num_epochs), desc="Benchmark", unit="epoch"):
+        # ATTRACTIVE PHASE: Process all edges (pull connected nodes together)
         with torch.no_grad():
             # 1. GATHER
             sync_device(device)
@@ -286,11 +394,11 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
             pos_u = node_positions[edges[:, 0]]
             pos_v = node_positions[edges[:, 1]]
             sync_device(device)
-            timings["gather"] += time.time() - op_start_time
+            timings["attractive"]["gather"] += time.time() - op_start_time
 
-            # Print tensor sizes on first iteration
+            # Print tensor sizes on first epoch
             if i == 0:
-                print("\n--- Intermediate Tensor Sizes (first iteration) ---")
+                print("\n--- Attractive Phase Tensor Sizes (first epoch) ---")
                 print_tensor_info("pos_u (gathered)", pos_u)
                 print_tensor_info("pos_v (gathered)", pos_v)
 
@@ -299,7 +407,7 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
             op_start_time = time.time()
             delta = (pos_v - pos_u) * edge_weights * learning_rate
             sync_device(device)
-            timings["compute"] += time.time() - op_start_time
+            timings["attractive"]["compute"] += time.time() - op_start_time
 
             if i == 0:
                 print_tensor_info("delta (computed)", delta)
@@ -315,7 +423,7 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
                 0, edges[:, 1].unsqueeze(1).expand_as(delta), -delta
             )
             sync_device(device)
-            timings["scatter_add"] += time.time() - op_start_time
+            timings["attractive"]["scatter_add"] += time.time() - op_start_time
 
             if i == 0:
                 print_tensor_info("update_aggregator (scattered)", update_aggregator)
@@ -326,14 +434,34 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
                     get_tensor_size_bytes(delta) +
                     get_tensor_size_bytes(update_aggregator)
                 )
-                print(f"  Peak intermediate memory: {format_bytes(intermediate_bytes)}\n")
+                print(f"  Peak intermediate memory (attractive): {format_bytes(intermediate_bytes)}\n")
 
             # 4. APPLY UPDATES
             sync_device(device)
             op_start_time = time.time()
             node_positions += update_aggregator
             sync_device(device)
-            timings["apply_updates"] += time.time() - op_start_time
+            timings["attractive"]["apply_updates"] += time.time() - op_start_time
+
+        # REPULSIVE PHASE: Process random pairs (push random nodes apart)
+        for neg_iter in range(num_negatives):
+            neg_timings = apply_repulsive_forces(
+                node_positions,
+                num_nodes,
+                num_edges,
+                negative_learning_rate,
+                device,
+                index_dtype,
+            )
+            # Accumulate timings
+            for key in neg_timings:
+                timings["repulsive"][key] += neg_timings[key]
+
+            # Print info on first repulsive pass of first epoch
+            if i == 0 and neg_iter == 0:
+                print("--- Repulsive Phase ---")
+                print(f"Sampling {num_edges:,} random pairs per repulsive pass")
+                print(f"Total repulsive samples per epoch: {num_edges * num_negatives:,}\n")
 
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
@@ -360,22 +488,37 @@ def compute_checksum(node_positions):
     return checksum
 
 
-def print_results(total_duration, timings, num_iterations, checksum):
+def print_results(total_duration, timings, num_epochs, checksum):
     """Print benchmark results.
 
     Args:
-        total_duration: Total time taken for all iterations
-        timings: Dictionary of operation timings
-        num_iterations: Number of iterations run
+        total_duration: Total time taken for all epochs
+        timings: Dictionary of operation timings (nested dict with attractive/repulsive)
+        num_epochs: Number of epochs run
         checksum: Dictionary of checksum metrics
     """
     print("\n--- Benchmark Results ---")
-    print(f"Total time for {num_iterations} iterations: {total_duration:.4f} seconds")
-    print(f"Average time per iteration: {total_duration / num_iterations:.4f} seconds\n")
+    print(f"Total time for {num_epochs} epochs: {total_duration:.4f} seconds")
+    print(f"Average time per epoch: {total_duration / num_epochs:.4f} seconds\n")
 
-    print("--- Aggregated Time Per Operation ---")
-    for op, t in timings.items():
-        percentage = (t / total_duration) * 100
+    # Calculate totals for attractive and repulsive phases
+    attractive_total = sum(timings["attractive"].values())
+    repulsive_total = sum(timings["repulsive"].values())
+
+    print("--- Phase Breakdown ---")
+    attractive_pct = (attractive_total / total_duration) * 100
+    repulsive_pct = (repulsive_total / total_duration) * 100
+    print(f"Attractive phase: {attractive_total:.4f} seconds ({attractive_pct:.2f}%)")
+    print(f"Repulsive phase:  {repulsive_total:.4f} seconds ({repulsive_pct:.2f}%)\n")
+
+    print("--- Attractive Phase Operations ---")
+    for op, t in timings["attractive"].items():
+        percentage = (t / attractive_total) * 100 if attractive_total > 0 else 0
+        print(f"{op:<15}: {t:.4f} seconds ({percentage:.2f}%)")
+
+    print("\n--- Repulsive Phase Operations ---")
+    for op, t in timings["repulsive"].items():
+        percentage = (t / repulsive_total) * 100 if repulsive_total > 0 else 0
         print(f"{op:<15}: {t:.4f} seconds ({percentage:.2f}%)")
 
     print("\n--- Result Checksum (for verification) ---")
@@ -385,11 +528,11 @@ def print_results(total_duration, timings, num_iterations, checksum):
     print(f"Min:  {checksum['min']:.10f}")
     print(f"Max:  {checksum['max']:.10f}")
 
-    # Estimate time for 2000 iterations
-    avg_time_per_iteration = total_duration / num_iterations
-    estimated_time_2000 = avg_time_per_iteration * 2000
+    # Estimate time for 2000 epochs
+    avg_time_per_epoch = total_duration / num_epochs
+    estimated_time_2000 = avg_time_per_epoch * 2000
     estimated_hours = estimated_time_2000 / 3600
-    print(f"\n--- Estimated Time for 2000 Iterations ---")
+    print(f"\n--- Estimated Time for 2000 Epochs ---")
     print(f"Estimated time: {estimated_hours:.2f} hours")
 
 
@@ -403,6 +546,9 @@ def main():
 
     device = get_device(args.device)
 
+    # Determine index dtype
+    index_dtype = torch.int64 if args.use_int64 else torch.int32
+
     node_positions, edges, edge_weights, num_edges = generate_graph_data(
         args.num_nodes, args.degree, device, args.use_int64
     )
@@ -412,12 +558,22 @@ def main():
     warmup_iteration(node_positions, edges, edge_weights, args.learning_rate, device)
 
     total_duration, timings = run_benchmark(
-        node_positions, edges, edge_weights, args.learning_rate, args.iterations, device
+        node_positions,
+        edges,
+        edge_weights,
+        args.learning_rate,
+        args.negative_learning_rate,
+        args.num_negatives,
+        args.epochs,
+        device,
+        args.num_nodes,
+        num_edges,
+        index_dtype,
     )
 
     checksum = compute_checksum(node_positions)
 
-    print_results(total_duration, timings, args.iterations, checksum)
+    print_results(total_duration, timings, args.epochs, checksum)
 
 
 if __name__ == "__main__":
