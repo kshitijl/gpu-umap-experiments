@@ -1,6 +1,7 @@
 import torch
 import time
 import argparse
+from tqdm import tqdm
 
 
 def parse_args():
@@ -277,10 +278,7 @@ def run_benchmark(node_positions, edges, edge_weights, learning_rate, num_iterat
     print(f"Starting benchmark for {num_iterations} iterations...")
 
     total_start_time = time.time()
-    for i in range(num_iterations):
-        if (i + 1) % 10 == 0:
-            print(f"Iteration {i + 1}/{num_iterations}")
-
+    for i in tqdm(range(num_iterations), desc="Benchmark", unit="iter"):
         with torch.no_grad():
             # 1. GATHER
             sync_device(device)
