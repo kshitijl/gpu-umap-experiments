@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# jupyter trash
+.ipynb_checkpoints

@@ -125,12 +125,12 @@ def format_bytes(size_bytes):
     """
     if size_bytes < 1024:
         return f"{size_bytes:.2f} B"
-    elif size_bytes < 1024 ** 2:
+    elif size_bytes < 1024**2:
         return f"{size_bytes / 1024:.2f} KB"
-    elif size_bytes < 1024 ** 3:
-        return f"{size_bytes / (1024 ** 2):.2f} MB"
+    elif size_bytes < 1024**3:
+        return f"{size_bytes / (1024**2):.2f} MB"
     else:
-        return f"{size_bytes / (1024 ** 3):.2f} GB"
+        return f"{size_bytes / (1024**3):.2f} GB"
 
 
 def get_tensor_size_bytes(tensor):
@@ -186,16 +186,18 @@ def generate_graph_data(num_nodes, avg_degree, device, use_int64=False):
     node_positions = torch.rand(num_nodes, 2, device=device, dtype=torch.float32)
 
     # Create the source nodes
-    source_nodes = torch.arange(num_nodes, device=device, dtype=index_dtype).repeat_interleave(
-        avg_degree // 2
-    )
+    source_nodes = torch.arange(
+        num_nodes, device=device, dtype=index_dtype
+    ).repeat_interleave(avg_degree // 2)
 
     # Get the number of edges dynamically from the source_nodes tensor
     num_edges = len(source_nodes)
     print(f"Dynamically set NUM_EDGES to {num_edges:,}")
 
     # Create the destination nodes
-    dest_nodes = torch.randint(0, num_nodes, (num_edges,), device=device, dtype=index_dtype)
+    dest_nodes = torch.randint(
+        0, num_nodes, (num_edges,), device=device, dtype=index_dtype
+    )
 
     # Shuffle and combine
     perm = torch.randperm(num_edges, device=device, dtype=index_dtype)
@@ -210,16 +212,18 @@ def generate_graph_data(num_nodes, avg_degree, device, use_int64=False):
     print_tensor_info("edges", edges)
     print_tensor_info("edge_weights", edge_weights)
     total_bytes = (
-        get_tensor_size_bytes(node_positions) +
-        get_tensor_size_bytes(edges) +
-        get_tensor_size_bytes(edge_weights)
+        get_tensor_size_bytes(node_positions)
+        + get_tensor_size_bytes(edges)
+        + get_tensor_size_bytes(edge_weights)
     )
     print(f"  Total (base tensors): {format_bytes(total_bytes)}")
 
     return node_positions, edges, edge_weights, num_edges
 
 
-def apply_updates_segment_reduce(node_positions, indices_src, indices_dst, deltas, num_nodes, device):
+def apply_updates_segment_reduce(
+    node_positions, indices_src, indices_dst, deltas, num_nodes, device
+):
     """Apply updates using segment_reduce (requires sorting).
 
     Args:
@@ -263,9 +267,7 @@ def apply_updates_segment_reduce(node_positions, indices_src, indices_dst, delta
         segment_lengths = torch.bincount(sorted_indices, minlength=num_nodes)
         # segment_reduce sums all deltas for each node
         node_updates = torch.segment_reduce(
-            data=sorted_deltas,
-            reduce='sum',
-            lengths=segment_lengths
+            data=sorted_deltas, reduce="sum", lengths=segment_lengths
         )
         # Apply updates
         node_positions += node_updates
@@ -302,7 +304,15 @@ def verify_node_degrees(edges, num_nodes):
     print(f"Max degree: {max_degree:.2f}\n")
 
 
-def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learning_rate, device, index_dtype, use_segment_reduce=False):
+def apply_repulsive_forces(
+    node_positions,
+    num_nodes,
+    num_pairs,
+    negative_learning_rate,
+    device,
+    index_dtype,
+    use_segment_reduce=False,
+):
     """Apply repulsive forces to random pairs of nodes.
 
     Args:
@@ -338,7 +348,9 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
         # 1. SAMPLE random pairs
         sync_device(device)
         op_start_time = time.time()
-        random_pairs = torch.randint(0, num_nodes, (num_pairs, 2), device=device, dtype=index_dtype)
+        random_pairs = torch.randint(
+            0, num_nodes, (num_pairs, 2), device=device, dtype=index_dtype
+        )
         sync_device(device)
         timings["sample"] += time.time() - op_start_time
 
@@ -366,7 +378,7 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
                 random_pairs[:, 1],
                 -delta,  # Negative delta for source nodes
                 num_nodes,
-                device
+                device,
             )
             timings["concat"] += update_timings["concat"]
             timings["sort"] += update_timings["sort"]
@@ -388,7 +400,15 @@ def apply_repulsive_forces(node_positions, num_nodes, num_pairs, negative_learni
     return timings
 
 
-def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device, num_nodes=None, use_segment_reduce=False):
+def warmup_iteration(
+    node_positions,
+    edges,
+    edge_weights,
+    learning_rate,
+    device,
+    num_nodes=None,
+    use_segment_reduce=False,
+):
     """Run a warm-up iteration to initialize GPU kernels.
 
     Args:
@@ -408,12 +428,7 @@ def warmup_iteration(node_positions, edges, edge_weights, learning_rate, device,
         if use_segment_reduce:
             # Use segment_reduce approach
             apply_updates_segment_reduce(
-                node_positions,
-                edges[:, 0],
-                edges[:, 1],
-                delta,
-                num_nodes,
-                device
+                node_positions, edges[:, 0], edges[:, 1], delta, num_nodes, device
             )
         else:
             # Update directly without intermediate tensor
@@ -527,12 +542,7 @@ def run_benchmark(
             if use_segment_reduce:
                 # Use segment_reduce approach
                 update_timings = apply_updates_segment_reduce(
-                    node_positions,
-                    edges[:, 0],
-                    edges[:, 1],
-                    delta,
-                    num_nodes,
-                    device
+                    node_positions, edges[:, 0], edges[:, 1], delta, num_nodes, device
                 )
                 timings["attractive"]["concat"] += update_timings["concat"]
                 timings["attractive"]["sort"] += update_timings["sort"]
@@ -554,11 +564,13 @@ def run_benchmark(
             if i == 0:
                 # Calculate peak memory usage for intermediate tensors
                 intermediate_bytes = (
-                    get_tensor_size_bytes(pos_u) +
-                    get_tensor_size_bytes(pos_v) +
-                    get_tensor_size_bytes(delta)
+                    get_tensor_size_bytes(pos_u)
+                    + get_tensor_size_bytes(pos_v)
+                    + get_tensor_size_bytes(delta)
                 )
-                print(f"  Peak intermediate memory (attractive): {format_bytes(intermediate_bytes)}\n")
+                print(
+                    f"  Peak intermediate memory (attractive): {format_bytes(intermediate_bytes)}\n"
+                )
 
         # REPULSIVE PHASE: Process random pairs (push random nodes apart)
         for neg_iter in range(num_negatives):
@@ -579,7 +591,9 @@ def run_benchmark(
             if i == 0 and neg_iter == 0:
                 print("--- Repulsive Phase ---")
                 print(f"Sampling {num_edges:,} random pairs per repulsive pass")
-                print(f"Total repulsive samples per epoch: {num_edges * num_negatives:,}\n")
+                print(
+                    f"Total repulsive samples per epoch: {num_edges * num_negatives:,}\n"
+                )
 
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
@@ -680,7 +694,7 @@ def main():
         args.learning_rate,
         device,
         args.num_nodes,
-        args.use_segment_reduce
+        args.use_segment_reduce,
     )
 
     total_duration, timings = run_benchmark(
