@@ -146,7 +146,7 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
     curand_states, state_size = allocate_curand_states(total_threads)
     print(curand_states, state_size)
 
-    init_curand((1,), (1,), (curand_states, 0))
+    init_curand((blocks_per_grid,), (threads_per_block,), (curand_states, 0))
 
     print("sources", sources)
     print("targets", targets)
