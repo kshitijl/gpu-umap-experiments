@@ -1,28 +1,12 @@
 [project]
-name = "15-umap-gpu"
+name = "gpu-umap-experiments"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "bokeh>=3.8.0",
-    "colorcet>=3.1.0",
-    "cupy-cuda12x>=13.6.0",
-    "datashader>=0.18.2",
-    "holoviews>=1.21.0",
-    "jupyter>=1.1.1",
-    "jupyterlab>=4.4.9",
-    "matplotlib>=3.10.7",
-    "numba-cuda[cu12]>=0.20.0",
-    "numpy>=2.3.3",
-    "nvidia-cuda-runtime-cu12>=12.8.90",
-    "nvidia-curand-cu12>=10.3.9.90",
-    "nvidia-nvjitlink-cu12>=12.8.93",
-    "pandas>=2.3.3",
-    "pyarrow>=21.0.0",
-    "pynvjitlink-cu12>=0.7.0",
-    "scipy>=1.16.2",
-    "torch>=2.8.0",
+    "cupy-cuda13x>=13.6.0",
+    "pyarrow>=22.0.0",
+    "scipy>=1.16.3",
     "tqdm>=4.67.1",
-    "triton>=3.4.0",
 ]
