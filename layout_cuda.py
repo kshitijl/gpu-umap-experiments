@@ -11,7 +11,8 @@ from tqdm import tqdm
 from utils import read_coo_array
 
 # initialize cuRAND states
-init_curand = cp.RawKernel(r'''
+init_curand = cp.RawKernel(
+    r"""
 #include <curand_kernel.h>
 
 extern "C" __global__
@@ -20,9 +21,12 @@ void init_curand_states(curandState *states, unsigned long long seed) {
     // Each thread gets same seed, different sequence number, no offset
     curand_init(seed + idx, 0, 0, &states[idx]);
 }
-''', 'init_curand_states')
+""",
+    "init_curand_states",
+)
 
-positive_sample_pass = cp.RawKernel(r'''
+positive_sample_pass = cp.RawKernel(
+    r"""
 #include <curand_kernel.h>
 
 __forceinline__ float clamp_grad(float value) {
@@ -85,10 +89,13 @@ void positive_sample_pass(
         atomicAdd(&grad_y[src], alpha * clamp_grad(dy * grad_coeff));
     }
 }
-''', 'positive_sample_pass')
+""",
+    "positive_sample_pass",
+)
 
 # Helper to get curandState size
-_size_kernel = cp.RawKernel(r'''
+_size_kernel = cp.RawKernel(
+    r"""
 #include <curand_kernel.h>
 extern "C" __global__
 void get_curand_size(unsigned long long *size) {
@@ -96,7 +103,10 @@ void get_curand_size(unsigned long long *size) {
         *size = sizeof(curandState);
     }
 }
-''', 'get_curand_size')
+""",
+    "get_curand_size",
+)
+
 
 def allocate_curand_states(num_states):
     """Allocate memory for curandState array"""
@@ -106,6 +116,7 @@ def allocate_curand_states(num_states):
     state_size = int(size_result[0])
     return cp.empty(num_states * state_size, dtype=cp.uint8), state_size
 
+
 def layout(sources, targets, weights, initial_pos, n_epochs=500):
     assert sources.shape == targets.shape
     n_edges = len(sources)
@@ -114,14 +125,14 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
 
     pos_x = cp.asarray(initial_pos[:, 0], dtype=cp.float32)
     pos_y = cp.asarray(initial_pos[:, 1], dtype=cp.float32)
-    
+
     print(f"Sampling {n_edges:,} edges using custom kernel...")
 
     # Configure grid and block dimensions
     threads_per_block = 32
     blocks_per_grid = (n_edges + threads_per_block - 1) // threads_per_block
     total_threads = blocks_per_grid * threads_per_block
-    
+
     print(f"Grid: {blocks_per_grid} blocks × {threads_per_block} threads")
 
     grad_x = cp.zeros((n_nodes,), dtype=cp.float32)
@@ -139,21 +150,31 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
 
     print("sources", sources)
     print("targets", targets)
-    
+
     initial_alpha = alpha
 
     for n in tqdm(range(n_epochs)):
         cp.cuda.runtime.deviceSynchronize()
-    
+
         # Launch the kernel
         positive_sample_pass(
-            (blocks_per_grid,),      # grid dimensions
-            (threads_per_block,),     # block dimensions
+            (blocks_per_grid,),  # grid dimensions
+            (threads_per_block,),  # block dimensions
             (
-                pos_x, pos_y, grad_x, grad_y, n_nodes,
-                sources, targets, weights, n_edges,
-                a, b, gamma, alpha,
-                curand_states
+                pos_x,
+                pos_y,
+                grad_x,
+                grad_y,
+                n_nodes,
+                sources,
+                targets,
+                weights,
+                n_edges,
+                a,
+                b,
+                gamma,
+                alpha,
+                curand_states,
             ),
             shared_mem=64,
         )
@@ -190,8 +211,8 @@ def main():
     n_edges = len(weights)
 
     print(f"n_nodes: {n_nodes}, n_edges: {n_edges}")
-    print('sources', sources)
-    print('targets', targets)
+    print("sources", sources)
+    print("targets", targets)
 
     assert np.all(sources < n_nodes)
     assert np.all(targets < n_nodes)
