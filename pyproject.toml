@@ -12,17 +12,23 @@ dependencies = [
     "holoviews>=1.21.0",
     "jupyter>=1.1.1",
     "jupyterlab>=4.4.9",
+    "jupyterlab-gruvbox-dark",
     "matplotlib>=3.10.7",
-    "numba-cuda[cu12]>=0.20.0",
     "numpy>=2.3.3",
     "nvidia-cuda-runtime-cu12>=12.8.90",
     "nvidia-curand-cu12>=10.3.9.90",
-    "nvidia-nvjitlink-cu12>=12.8.93",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
-    "pynvjitlink-cu12>=0.7.0",
+    "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "torch>=2.8.0",
     "tqdm>=4.67.1",
-    "triton>=3.4.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "jupyterlab-gruvbox-dark",
+]
+
+[tool.uv.sources]
+jupyterlab-gruvbox-dark = { workspace = true }
