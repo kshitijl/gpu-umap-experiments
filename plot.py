@@ -120,10 +120,10 @@ def _get_embedding(umap_object):
         raise ValueError("Could not find embedding attribute of umap_object")
 
 
-def _embed_datashader_in_an_axis(datashader_image, ax):
+def _embed_datashader_in_an_axis(datashader_image, ax, extent=None):
     img_rev = datashader_image.data[::-1]
     mpl_img = np.dstack([_blue(img_rev), _green(img_rev), _red(img_rev)])
-    ax.imshow(mpl_img)
+    ax.imshow(mpl_img, extent=extent, origin="lower", aspect="auto")
     return ax
 
 
@@ -264,7 +264,7 @@ def _datashade_points(
         result = tf.set_background(result, background)
 
     if ax is not None:
-        _embed_datashader_in_an_axis(result, ax)
+        _embed_datashader_in_an_axis(result, ax, extent=extent)
         if show_legend and legend_elements is not None:
             ax.legend(handles=legend_elements)
         return ax
@@ -601,8 +601,6 @@ def points(
             show_legend,
             alpha,
         )
-
-    ax.set(xticks=[], yticks=[])
 
     ax.text(
         0.99,

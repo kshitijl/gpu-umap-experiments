@@ -6,105 +6,69 @@ Demonstrates writing raw CUDA C++ code as a string
 
 import cupy as cp
 import numpy as np
+import scipy.sparse
 from tqdm import tqdm
+from numpy.typing import NDArray
+from sklearn.decomposition import PCA
 
 from utils import read_coo_array
 
+with open('layout_cuda_kernel.cpp', 'r') as file:
+    layout_cuda_kernel = file.read()
+
 # initialize cuRAND states
-init_curand = cp.RawKernel(r'''
-#include <curand_kernel.h>
-
-extern "C" __global__
-void init_curand_states(curandState *states, unsigned long long seed) {
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    // Each thread gets same seed, different sequence number, no offset
-    curand_init(seed + idx, 0, 0, &states[idx]);
-}
-''', 'init_curand_states')
-
-positive_sample_pass = cp.RawKernel(r'''
-#include <curand_kernel.h>
-
-__forceinline__ float clamp_grad(float value) {
-    return fminf(fmaxf(value, -4.0f), 4.0f);
-}
-
-extern "C" __global__
-void positive_sample_pass(
-    const float* pos_x, const float* pos_y,
-    float* grad_x, float* grad_y,
-    int n_nodes,
-    const int* sources, const int* targets, const float* weights,
-    int n_edges,
-    float a,
-    float b,
-    float gamma,
-    float alpha,
-    curandState *states
-) {
-    extern __shared__ int s[];
-
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx >= n_edges) {
-        return;
-    }
-
-    curandState local_state = states[idx];
-
-    int src = sources[idx];
-    int dst = targets[idx];
-    float src_x = pos_x[src];
-    float src_y = pos_y[src];
-    float dst_x = pos_x[dst];
-    float dst_y = pos_y[dst];
-
-    float dx = src_x - dst_x;
-    float dy = src_y - dst_y;
-    float rdist = dx * dx + dy * dy;
-
-    float grad_coeff;
-    grad_coeff = -2.0f * a * b * weights[idx] * powf(rdist, b - 1.0f);
-    grad_coeff /= a * powf(rdist, b) + 1.0f;
-
-    atomicAdd(&grad_x[src], alpha * clamp_grad(dx * grad_coeff));
-    atomicAdd(&grad_y[src], alpha * clamp_grad(dy * grad_coeff));
-
-    int negative_sample_count = 10;
-    for (int i = 0; i < negative_sample_count; i++) {
-        unsigned int dst = curand(&local_state) % n_nodes; // ??
-        // printf("dst: %d\n", dst);
-        float dst_x = pos_x[dst];
-        float dst_y = pos_y[dst];
-        float dx = src_x - dst_x;
-        float dy = src_y - dst_y;
-        float rdist = dx * dx + dy * dy;
-        float grad_coeff = 2.0f * gamma * b;
-        grad_coeff /= (0.001f + rdist) * (a * powf(rdist, b) + 1.0f);
-
-        atomicAdd(&grad_x[src], alpha * clamp_grad(dx * grad_coeff));
-        atomicAdd(&grad_y[src], alpha * clamp_grad(dy * grad_coeff));
-    }
-}
-''', 'positive_sample_pass')
+init_curand = cp.RawKernel(layout_cuda_kernel, 'init_curand_states')
 
 # Helper to get curandState size
-_size_kernel = cp.RawKernel(r'''
-#include <curand_kernel.h>
-extern "C" __global__
-void get_curand_size(unsigned long long *size) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        *size = sizeof(curandState);
-    }
-}
-''', 'get_curand_size')
+get_sizeof_curand_state = cp.RawKernel(layout_cuda_kernel, 'get_sizeof_curand_state')
+
+positive_sample_pass = cp.RawKernel(layout_cuda_kernel, 'positive_sample_pass')
 
 def allocate_curand_states(num_states):
     """Allocate memory for curandState array"""
     size_result = cp.zeros(1, dtype=cp.uint64)
-    _size_kernel((1,), (1,), (size_result,))
+    get_sizeof_curand_state((1,), (1,), (size_result,))
     cp.cuda.Stream.null.synchronize()
     state_size = int(size_result[0])
     return cp.empty(num_states * state_size, dtype=cp.uint8), state_size
+
+def reorder_graph(G: scipy.sparse.coo_array) -> tuple[scipy.sparse.coo_array, NDArray[np.int32]]:
+    G_csr = G.tocsr()
+    perm = reverse_cuthill_mckee(G_csr, symmetric_mode=True)
+    reordered_graph = G_csr[perm, :][:, perm]
+    # reordered_positions = positions[perm]
+
+    G = reordered_graph.tocoo()
+    mask = G.row <= G.col  # Upper triangle only
+    G.row, G.col, G.data = (
+        G.row[mask],
+        G.col[mask],
+        G.data[mask],
+    )
+
+    # Sort
+    sort_idx = np.lexsort((G.col, G.row))
+    G.row = G.row[sort_idx]
+    G.col = G.col[sort_idx]
+    G.data = G.data[sort_idx]
+
+    return G, perm
+
+def initialize_layout(
+    X: NDArray[np.float32],
+    n_components: int = 2,
+    random_state: np.random.RandomState | None = None,
+) -> NDArray[np.float32]:
+    if random_state is None:
+        random_state = np.random.RandomState(42)
+
+    pca = PCA(n_components=n_components, random_state=random_state)
+    positions = pca.fit_transform(X).astype(np.float32)
+    positions = noisy_scale_coords(
+        positions, random_state, max_coord=10, noise=0.0001
+    )
+
+    return positions
 
 def layout(sources, targets, weights, initial_pos, n_epochs=500):
     assert sources.shape == targets.shape
@@ -120,6 +84,10 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
     # Configure grid and block dimensions
     threads_per_block = 32
     blocks_per_grid = (n_edges + threads_per_block - 1) // threads_per_block
+    # threads_per_block = 4
+    # blocks_per_grid = 1
+    
+
     total_threads = blocks_per_grid * threads_per_block
     
     print(f"Grid: {blocks_per_grid} blocks × {threads_per_block} threads")
@@ -135,7 +103,7 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
     curand_states, state_size = allocate_curand_states(total_threads)
     print(curand_states, state_size)
 
-    init_curand((1,), (1,), (curand_states, 0))
+    init_curand((blocks_per_grid,), (threads_per_block,), (curand_states, 0))
 
     print("sources", sources)
     print("targets", targets)

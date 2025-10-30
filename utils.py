@@ -101,7 +101,9 @@ class EdgeReader(ArrowReader):
         targets: NDArray[np.int32] = columns[2]
         return (weights, sources, targets)
 
-def read_coo_array(file_path: str, n_nodes: int | None = None, copy=False):
+def read_coo_array(
+    file_path: str, n_nodes: int | None = None, copy=False
+) -> scipy.sparse.coo_array:
     with EdgeReader(file_path) as reader:
         (weights, sources, targets) = reader.get_edges()
 
