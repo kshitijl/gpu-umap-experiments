@@ -15,13 +15,10 @@ dependencies = [
     "jupyterlab-gruvbox-dark",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
-    "nvidia-cuda-runtime-cu12>=12.8.90",
-    "nvidia-curand-cu12>=10.3.9.90",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
-    "torch>=2.8.0",
     "tqdm>=4.67.1",
 ]
 

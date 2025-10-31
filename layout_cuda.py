@@ -16,21 +16,14 @@ from utils import read_coo_array
 with open('layout_cuda_kernel.cpp', 'r') as file:
     layout_cuda_kernel = file.read()
 
-# initialize cuRAND states
-init_curand = cp.RawKernel(layout_cuda_kernel, 'init_curand_states')
-
-# Helper to get curandState size
-get_sizeof_curand_state = cp.RawKernel(layout_cuda_kernel, 'get_sizeof_curand_state')
-
-positive_sample_pass = cp.RawKernel(layout_cuda_kernel, 'positive_sample_pass')
-
-def allocate_curand_states(num_states):
-    """Allocate memory for curandState array"""
-    size_result = cp.zeros(1, dtype=cp.uint64)
-    get_sizeof_curand_state((1,), (1,), (size_result,))
-    cp.cuda.Stream.null.synchronize()
-    state_size = int(size_result[0])
-    return cp.empty(num_states * state_size, dtype=cp.uint8), state_size
+positive_sample_pass = cp.RawKernel(
+    layout_cuda_kernel,
+    'positive_sample_pass',
+    options=(
+        "-Invidia-mathdx-25.06.1/nvidia/mathdx/25.06/include/",
+        "-std=c++20",
+    )
+)
 
 def reorder_graph(G: scipy.sparse.coo_array) -> tuple[scipy.sparse.coo_array, NDArray[np.int32]]:
     G_csr = G.tocsr()
@@ -100,11 +93,6 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
     gamma = cp.float32(1.0)
     alpha = cp.float32(1.0)
 
-    curand_states, state_size = allocate_curand_states(total_threads)
-    print(curand_states, state_size)
-
-    init_curand((blocks_per_grid,), (threads_per_block,), (curand_states, 0))
-
     print("sources", sources)
     print("targets", targets)
     
@@ -120,8 +108,7 @@ def layout(sources, targets, weights, initial_pos, n_epochs=500):
             (
                 pos_x, pos_y, grad_x, grad_y, n_nodes,
                 sources, targets, weights, n_edges,
-                a, b, gamma, alpha,
-                curand_states
+                a, b, gamma, alpha, n, n_epochs
             ),
             shared_mem=64,
         )

@@ -1,6 +1,11 @@
 ## how to run
 
 ```
+wget https://developer.nvidia.com/downloads/compute/cuRANDDx/redist/cuRANDDx/cuda12/nvidia-mathdx-25.06.1-cuda12.tar.gz 
+tar -xzf nvidia-mathdx-25.06.1-cuda12.tar.gz
+```
+
+```
 uv run main.py
 ```
 

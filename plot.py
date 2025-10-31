@@ -134,11 +134,13 @@ def _get_extent(points):
     min_y = np.nanmin(points[:, 1])
     max_y = np.nanmax(points[:, 1])
 
+    w = max_x - min_x
+    h = max_y - min_y
     extent = (
-        np.round(min_x - 0.05 * (max_x - min_x)),
-        np.round(max_x + 0.05 * (max_x - min_x)),
-        np.round(min_y - 0.05 * (max_y - min_y)),
-        np.round(max_y + 0.05 * (max_y - min_y)),
+        np.round(min_x - 0.05 * w),
+        np.round(max_x + 0.05 * w),
+        np.round(min_y - 0.05 * h),
+        np.round(max_y + 0.05 * h),
     )
 
     return extent
